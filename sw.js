@@ -3,18 +3,19 @@
  * 提供離線支援和快取策略
  */
 
-const CACHE_NAME = 'banana-remover-v1.2.0';
+const CACHE_NAME = 'banana-remover-v1.3.0';
+// 使用相對路徑，無論部署在子路徑 (GitHub Pages) 或根目錄都能正確解析
 const ASSETS_TO_CACHE = [
-    '/',
-    '/index.html',
-    '/styles.css',
-    '/app.js',
-    '/worker.js',
-    '/manifest.json',
-    '/assets/mask_48.png',
-    '/assets/mask_96.png',
-    '/assets/icon-192.png',
-    '/assets/icon-512.png'
+    './',
+    './index.html',
+    './styles.css',
+    './app.js',
+    './worker.js',
+    './manifest.json',
+    './assets/mask_48.png',
+    './assets/mask_96.png',
+    './assets/icon-192.png',
+    './assets/icon-512.png'
 ];
 
 // 安裝事件 - 快取資源
