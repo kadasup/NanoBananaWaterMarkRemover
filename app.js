@@ -28,13 +28,6 @@ const DOM = {
     resultsGrid: document.getElementById('resultsGrid'),
     clearBtn: document.getElementById('clearBtn'),
     downloadAllBtn: document.getElementById('downloadAllBtn'),
-    // Modal elements
-    infoBtn: document.getElementById('infoBtn'),
-    infoModal: document.getElementById('infoModal'),
-    modalClose: document.getElementById('modalClose'),
-    // GitHub elements
-    githubLink: document.getElementById('githubLink'),
-    starCount: document.getElementById('starCount'),
     // Lightbox elements
     lightbox: document.getElementById('lightbox'),
     lightboxClose: document.getElementById('lightboxClose'),
@@ -66,21 +59,48 @@ async function init() {
     initWorker();
     registerServiceWorker();
     await loadMasks();
+    await initMasksInWorker();
     setupEventListeners();
-    fetchGitHubStars();
     console.log('🍌 Nano Banana Watermark Remover initialized');
+}
+
+/**
+ * 把所有 mask 傳給 worker (一次性，後續處理只需傳圖片資料)
+ */
+function initMasksInWorker() {
+    const promises = [];
+    for (const [size, mask] of state.masks.entries()) {
+        promises.push(new Promise((resolve) => {
+            const handler = (e) => {
+                if (e.data.type === 'maskReady' && e.data.size === size) {
+                    worker.removeEventListener('message', handler);
+                    resolve();
+                }
+            };
+            worker.addEventListener('message', handler);
+            // 用複本傳給 worker，主線程仍保留 mask 供 selectMask 等使用
+            const maskDataCopy = new Uint8ClampedArray(mask.imageData.data);
+            worker.postMessage({
+                type: 'initMask',
+                data: {
+                    size,
+                    maskData: maskDataCopy,
+                    maskWidth: mask.width,
+                    maskHeight: mask.height,
+                    margin: mask.margin
+                }
+            }, [maskDataCopy.buffer]);
+        }));
+    }
+    return Promise.all(promises);
 }
 
 /**
  * 初始化 Web Worker
  */
 function initWorker() {
-    if (window.Worker) {
-        worker = new Worker('worker.js');
-        console.log('🔧 Web Worker initialized');
-    } else {
-        console.warn('Web Workers not supported, using main thread');
-    }
+    worker = new Worker('worker.js');
+    console.log('🔧 Web Worker initialized');
 }
 
 /**
@@ -125,37 +145,6 @@ function toggleTheme() {
     document.documentElement.setAttribute('data-theme', newTheme);
     localStorage.setItem('theme', newTheme);
     console.log(`🌙 Theme changed to: ${newTheme}`);
-}
-
-/**
- * 從 shields.io 獲取 GitHub stars
- */
-async function fetchGitHubStars() {
-    const user = 'ADT109119';
-    const repo = 'NanoBananaWaterMarkRemover';
-    const url = `https://img.shields.io/github/stars/${user}/${repo}`;
-    
-    try {
-        const response = await fetch(url);
-        if (!response.ok) throw new Error('Failed to fetch');
-        
-        const svgText = await response.text();
-        
-        // 從 SVG 中提取 star 數字
-        // 尋找 textLength 後的數字內容
-        const match = svgText.match(/<text[^>]*id="rlink"[^>]*>([^<]+)<\/text>/);
-        
-        if (match && match[1]) {
-            const starCount = match[1].trim();
-            if (DOM.starCount) {
-                DOM.starCount.textContent = starCount;
-            }
-            console.log(`⭐ GitHub stars: ${starCount}`);
-        }
-    } catch (error) {
-        console.log('Could not fetch GitHub stars:', error.message);
-        // 保持顯示 "--"
-    }
 }
 
 /**
@@ -289,29 +278,10 @@ function setupEventListeners() {
     // Download all button
     DOM.downloadAllBtn.addEventListener('click', downloadAll);
     
-    // Modal open/close
-    if (DOM.infoBtn) {
-        DOM.infoBtn.addEventListener('click', openModal);
-    }
-    if (DOM.modalClose) {
-        DOM.modalClose.addEventListener('click', closeModal);
-    }
-    if (DOM.infoModal) {
-        DOM.infoModal.addEventListener('click', (e) => {
-            if (e.target === DOM.infoModal) {
-                closeModal();
-            }
-        });
-    }
-    
-    // Close modal on Escape key
+    // Close lightbox on Escape key
     document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape') {
-            if (state.lightbox.isOpen) {
-                closeLightbox();
-            } else if (DOM.infoModal && !DOM.infoModal.hidden) {
-                closeModal();
-            }
+        if (e.key === 'Escape' && state.lightbox.isOpen) {
+            closeLightbox();
         }
         // Lightbox navigation with arrow keys
         if (state.lightbox.isOpen) {
@@ -356,21 +326,6 @@ function setupEventListeners() {
     // Theme toggle
     if (DOM.themeToggle) {
         DOM.themeToggle.addEventListener('click', toggleTheme);
-    }
-}
-
-// ===== Modal Functions =====
-function openModal() {
-    if (DOM.infoModal) {
-        DOM.infoModal.hidden = false;
-        document.body.style.overflow = 'hidden';
-    }
-}
-
-function closeModal() {
-    if (DOM.infoModal) {
-        DOM.infoModal.hidden = true;
-        document.body.style.overflow = '';
     }
 }
 
@@ -570,99 +525,67 @@ async function processFiles(files) {
  */
 async function processImage(file) {
     const image = await loadImageFromFile(file);
-    
+
     // 找到合適的 mask
     const mask = selectMask(image.width, image.height);
     if (!mask) {
         throw new Error('找不到合適的 mask');
     }
-    
+
+    // 保留輸入格式 (PNG 或 JPEG)
+    const outputMime = file.type === 'image/jpeg' ? 'image/jpeg' : 'image/png';
+    const outputExt = outputMime === 'image/jpeg' ? 'jpg' : 'png';
+    const jpegQuality = 0.95;
+
+    // 原圖 Blob 就是 File 本身 (省一次 encode)
+    const originalBlob = file;
+
     // 創建 canvas 進行處理
     const canvas = document.createElement('canvas');
     canvas.width = image.width;
     canvas.height = image.height;
     const ctx = canvas.getContext('2d');
     ctx.drawImage(image, 0, 0);
-    
-    // 保存原圖 Blob (用於燈箱比較)
-    const originalBlob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
-    
+
     // 取得原圖 ImageData
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    
-    // 使用 Worker 進行偵測和處理
-    if (worker) {
-        // 偵測是否有浮水印
-        const hasWatermark = await detectWatermarkWithWorker(
-            imageData.data, 
-            mask.imageData.data, 
-            mask.width, 
-            mask.height, 
-            mask.margin, 
-            canvas.width, 
-            canvas.height
-        );
-        
-        if (!hasWatermark) {
-            // 沒有偵測到浮水印，返回原圖
-            return {
-                filename: file.name,
-                originalName: file.name,
-                blob: originalBlob,
-                originalBlob: originalBlob,
-                width: image.width,
-                height: image.height,
-                maskSize: mask.width,
-                margin: mask.margin,
-                success: true,
-                noWatermark: true
-            };
-        }
-        
-        // 使用 Worker 執行 Reverse Alpha Blending
-        const processedData = await processImageWithWorker(
-            imageData.data,
-            mask.imageData.data,
-            mask.width,
-            mask.height,
-            mask.margin,
-            canvas.width,
-            canvas.height
-        );
-        
-        // 將結果寫回 canvas
-        const newImageData = new ImageData(processedData, canvas.width, canvas.height);
-        ctx.putImageData(newImageData, 0, 0);
-    } else {
-        // Fallback: 使用主線程處理
-        const hasWatermark = detectWatermark(imageData, mask, canvas.width, canvas.height);
-        
-        if (!hasWatermark) {
-            return {
-                filename: file.name,
-                originalName: file.name,
-                blob: originalBlob,
-                originalBlob: originalBlob,
-                width: image.width,
-                height: image.height,
-                maskSize: mask.width,
-                margin: mask.margin,
-                success: true,
-                noWatermark: true
-            };
-        }
-        
-        reverseAlphaBlend(imageData, mask, canvas.width, canvas.height);
-        ctx.putImageData(imageData, 0, 0);
+
+    // 偵測浮水印 (transfer imageData buffer 到 worker)
+    let imgBytes = imageData.data;
+    const detect = await detectWatermarkWithWorker(imgBytes, mask.width, canvas.width, canvas.height);
+    imgBytes = detect.imageData; // worker transfer 回來的同一份 buffer
+
+    if (!detect.hasWatermark) {
+        return {
+            filename: `clear_${file.name}`,
+            originalName: file.name,
+            blob: originalBlob,
+            originalBlob,
+            width: image.width,
+            height: image.height,
+            maskSize: mask.width,
+            margin: mask.margin,
+            success: true,
+            noWatermark: true
+        };
     }
-    
-    // 轉換為 Blob
-    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
-    
-    // 生成檔案名稱
+
+    // 使用 Worker 執行 Reverse Alpha Blending (再 transfer 出去一次)
+    const processedData = await processImageWithWorker(imgBytes, mask.width, canvas.width, canvas.height);
+
+    // 將結果寫回 canvas
+    const newImageData = new ImageData(processedData, canvas.width, canvas.height);
+    ctx.putImageData(newImageData, 0, 0);
+
+    // 轉換為 Blob (保留原格式)
+    const blob = await new Promise((resolve) =>
+        canvas.toBlob(resolve, outputMime, outputMime === 'image/jpeg' ? jpegQuality : undefined)
+    );
+
+    // 生成檔案名稱：前綴 clear_ 作為識別
     const baseName = file.name.replace(/\.[^.]+$/, '');
-    const outputFilename = `${baseName}_(watermark removed).png`;
-    
+    const outputFilename = `clear_${baseName}.${outputExt}`;
+
     return {
         filename: outputFilename,
         originalName: file.name,
@@ -678,176 +601,45 @@ async function processImage(file) {
 }
 
 /**
- * 使用 Worker 偵測浮水印
+ * 使用 Worker 偵測浮水印 (透過 transfer 不複製 buffer)
+ * @returns {Promise<{hasWatermark: boolean, imageData: Uint8ClampedArray}>}
  */
-function detectWatermarkWithWorker(imageData, maskData, maskWidth, maskHeight, margin, imgWidth, imgHeight) {
+function detectWatermarkWithWorker(imageBytes, maskSize, imgWidth, imgHeight) {
     return new Promise((resolve) => {
         const handler = (e) => {
             if (e.data.type === 'detectResult') {
                 worker.removeEventListener('message', handler);
                 console.log(`🔍 Worker detection: diff=${e.data.debug?.brightnessDiff?.toFixed(1)}`);
-                resolve(e.data.hasWatermark);
+                resolve({ hasWatermark: e.data.hasWatermark, imageData: e.data.imageData });
             }
         };
         worker.addEventListener('message', handler);
-        
-        // 複製數據以避免 transfer 後無法使用
-        const imgDataCopy = new Uint8ClampedArray(imageData);
-        const maskDataCopy = new Uint8ClampedArray(maskData);
-        
+
         worker.postMessage({
             type: 'detect',
-            data: {
-                imageData: imgDataCopy,
-                maskData: maskDataCopy,
-                maskWidth,
-                maskHeight,
-                margin,
-                imgWidth,
-                imgHeight
-            }
-        });
+            data: { imageData: imageBytes, maskSize, imgWidth, imgHeight }
+        }, [imageBytes.buffer]);
     });
 }
 
 /**
- * 使用 Worker 處理圖片
+ * 使用 Worker 處理圖片 (透過 transfer 不複製 buffer)
  */
-function processImageWithWorker(imageData, maskData, maskWidth, maskHeight, margin, imgWidth, imgHeight) {
+function processImageWithWorker(imageBytes, maskSize, imgWidth, imgHeight) {
     return new Promise((resolve) => {
         const handler = (e) => {
             if (e.data.type === 'processResult') {
                 worker.removeEventListener('message', handler);
-                resolve(new Uint8ClampedArray(e.data.imageData));
+                resolve(e.data.imageData);
             }
         };
         worker.addEventListener('message', handler);
-        
-        // 複製數據給 Worker
-        const imgDataCopy = new Uint8ClampedArray(imageData);
-        const maskDataCopy = new Uint8ClampedArray(maskData);
-        
+
         worker.postMessage({
             type: 'process',
-            data: {
-                imageData: imgDataCopy,
-                maskData: maskDataCopy,
-                maskWidth,
-                maskHeight,
-                margin,
-                imgWidth,
-                imgHeight
-            }
-        });
+            data: { imageData: imageBytes, maskSize, imgWidth, imgHeight }
+        }, [imageBytes.buffer]);
     });
-}
-
-/**
- * 偵測圖片是否含有浮水印
- * 
- * 原理：浮水印是白色半透明疊加，會使原圖在浮水印區域變亮。
- * 我們檢查 mask 有效區域的平均亮度，如果亮度高於周圍區域，則可能有浮水印。
- * 
- * @param {ImageData} imageData - 圖片 ImageData
- * @param {Object} mask - mask 物件
- * @param {number} imgWidth - 圖片寬度
- * @param {number} imgHeight - 圖片高度
- * @returns {boolean} 是否有浮水印
- */
-function detectWatermark(imageData, mask, imgWidth, imgHeight) {
-    const imgPixels = imageData.data;
-    const maskPixels = mask.imageData.data;
-    const maskWidth = mask.width;
-    const maskHeight = mask.height;
-    const margin = mask.margin;
-    
-    // 計算 mask 在圖片右下角的位置
-    const offsetX = imgWidth - maskWidth - margin;
-    const offsetY = imgHeight - maskHeight - margin;
-    
-    // 確保位置有效
-    if (offsetX < 0 || offsetY < 0) {
-        return false;
-    }
-    
-    let watermarkBrightness = 0;
-    let watermarkPixelCount = 0;
-    let surroundingBrightness = 0;
-    let surroundingPixelCount = 0;
-    
-    // 計算浮水印區域的亮度 (只計算 mask alpha > 0 的區域)
-    for (let my = 0; my < maskHeight; my++) {
-        for (let mx = 0; mx < maskWidth; mx++) {
-            const imgX = offsetX + mx;
-            const imgY = offsetY + my;
-            
-            if (imgX < 0 || imgY < 0 || imgX >= imgWidth || imgY >= imgHeight) continue;
-            
-            const imgIdx = (imgY * imgWidth + imgX) * 4;
-            const maskIdx = (my * maskWidth + mx) * 4;
-            
-            const alpha = maskPixels[maskIdx + 3] / 255;
-            
-            // 只檢查浮水印實際覆蓋的區域 (alpha > 0.1)
-            if (alpha > 0.1) {
-                const r = imgPixels[imgIdx];
-                const g = imgPixels[imgIdx + 1];
-                const b = imgPixels[imgIdx + 2];
-                const brightness = 0.299 * r + 0.587 * g + 0.114 * b;
-                
-                watermarkBrightness += brightness * alpha;
-                watermarkPixelCount += alpha;
-            }
-        }
-    }
-    
-    // 計算 mask 區域左邊和上邊的參考區域亮度
-    const sampleSize = Math.min(maskWidth, maskHeight);
-    
-    // 左側參考區域
-    for (let y = offsetY; y < offsetY + maskHeight && y < imgHeight; y++) {
-        for (let x = Math.max(0, offsetX - sampleSize); x < offsetX && x >= 0; x++) {
-            const imgIdx = (y * imgWidth + x) * 4;
-            const r = imgPixels[imgIdx];
-            const g = imgPixels[imgIdx + 1];
-            const b = imgPixels[imgIdx + 2];
-            const brightness = 0.299 * r + 0.587 * g + 0.114 * b;
-            
-            surroundingBrightness += brightness;
-            surroundingPixelCount++;
-        }
-    }
-    
-    // 上方參考區域
-    for (let y = Math.max(0, offsetY - sampleSize); y < offsetY && y >= 0; y++) {
-        for (let x = offsetX; x < offsetX + maskWidth && x < imgWidth; x++) {
-            const imgIdx = (y * imgWidth + x) * 4;
-            const r = imgPixels[imgIdx];
-            const g = imgPixels[imgIdx + 1];
-            const b = imgPixels[imgIdx + 2];
-            const brightness = 0.299 * r + 0.587 * g + 0.114 * b;
-            
-            surroundingBrightness += brightness;
-            surroundingPixelCount++;
-        }
-    }
-    
-    // 計算平均亮度
-    const avgWatermarkBrightness = watermarkPixelCount > 0 
-        ? watermarkBrightness / watermarkPixelCount 
-        : 0;
-    const avgSurroundingBrightness = surroundingPixelCount > 0 
-        ? surroundingBrightness / surroundingPixelCount 
-        : 128;
-    
-    // 浮水印區域應該比周圍更亮 (因為是白色半透明疊加)
-    // 如果浮水印區域亮度比周圍高出一定閾值，則認為有浮水印
-    const brightnessDiff = avgWatermarkBrightness - avgSurroundingBrightness;
-    const threshold = 10; // 亮度差閾值，調高以減少誤判
-    
-    console.log(`🔍 Watermark detection: wmBrightness=${avgWatermarkBrightness.toFixed(1)}, surroundingBrightness=${avgSurroundingBrightness.toFixed(1)}, diff=${brightnessDiff.toFixed(1)}`);
-    
-    return brightnessDiff > threshold;
 }
 
 /**
@@ -885,77 +677,6 @@ function selectMask(width, height) {
     return state.masks.get(48);
 }
 
-/**
- * 執行 Reverse Alpha Blending
- * 
- * 公式：Original = (Composite - Watermark × α) / (1 - α)
- * 
- * @param {ImageData} imageData - 原圖 ImageData
- * @param {Object} mask - mask 物件 (已預處理，alpha 為浮水印強度)
- * @param {number} imgWidth - 圖片寬度
- * @param {number} imgHeight - 圖片高度
- */
-function reverseAlphaBlend(imageData, mask, imgWidth, imgHeight) {
-    const imgPixels = imageData.data;
-    const maskPixels = mask.imageData.data;
-    const maskWidth = mask.width;
-    const maskHeight = mask.height;
-    const margin = mask.margin;
-    
-    // 計算 mask 在圖片右下角的位置 (考慮邊距)
-    const offsetX = imgWidth - maskWidth - margin;
-    const offsetY = imgHeight - maskHeight - margin;
-    
-    // 處理 mask 覆蓋的區域
-    for (let my = 0; my < maskHeight; my++) {
-        for (let mx = 0; mx < maskWidth; mx++) {
-            const imgX = offsetX + mx;
-            const imgY = offsetY + my;
-            
-            // 確保在圖片範圍內
-            if (imgX < 0 || imgY < 0 || imgX >= imgWidth || imgY >= imgHeight) continue;
-            
-            const imgIdx = (imgY * imgWidth + imgX) * 4;
-            const maskIdx = (my * maskWidth + mx) * 4;
-            
-            // 取得 mask 的 alpha 值 (已預處理：亮度 → alpha)
-            const alpha = maskPixels[maskIdx + 3] / 255;
-            
-            // 如果 alpha 接近 0，跳過處理 (非浮水印區域)
-            if (alpha < 0.01) continue;
-            
-            // 取得 mask 的 RGB 值 (浮水印顏色，預處理後為白色)
-            const wmR = maskPixels[maskIdx];
-            const wmG = maskPixels[maskIdx + 1];
-            const wmB = maskPixels[maskIdx + 2];
-            
-            // 取得合成圖的 RGB 值
-            const compR = imgPixels[imgIdx];
-            const compG = imgPixels[imgIdx + 1];
-            const compB = imgPixels[imgIdx + 2];
-            
-            // Reverse Alpha Blending
-            // Original = (Composite - Watermark × α) / (1 - α)
-            const invAlpha = 1 - alpha;
-            
-            // 防止除以零
-            if (invAlpha < 0.01) {
-                // 完全被浮水印覆蓋，無法還原，保持原樣
-                continue;
-            }
-            
-            let origR = (compR - wmR * alpha) / invAlpha;
-            let origG = (compG - wmG * alpha) / invAlpha;
-            let origB = (compB - wmB * alpha) / invAlpha;
-            
-            // 限制在 0-255 範圍內
-            imgPixels[imgIdx] = Math.max(0, Math.min(255, Math.round(origR)));
-            imgPixels[imgIdx + 1] = Math.max(0, Math.min(255, Math.round(origG)));
-            imgPixels[imgIdx + 2] = Math.max(0, Math.min(255, Math.round(origB)));
-        }
-    }
-}
-
 // ===== UI Functions =====
 
 function showStatus() {
@@ -987,74 +708,94 @@ function addResultCard(result) {
     const imageIndex = state.processedImages.length - 1;
     
     if (result.success) {
-        // 創建 Object URL 用於預覽和下載
         const blobUrl = URL.createObjectURL(result.blob);
-        const originalBlobUrl = result.originalBlob ? URL.createObjectURL(result.originalBlob) : blobUrl;
-        
-        // 根據是否有浮水印顯示不同的 badge
+        // noWatermark 時 result.blob === result.originalBlob，重用同一個 URL
+        const originalBlobUrl = result.originalBlob && result.originalBlob !== result.blob
+            ? URL.createObjectURL(result.originalBlob)
+            : blobUrl;
+
         const badgeClass = result.noWatermark ? 'no-watermark' : 'success';
         const badgeText = result.noWatermark ? '⚠ 未偵測到浮水印' : '✓ 完成';
         const statusNote = result.noWatermark ? ' · 原圖' : '';
-        
-        card.innerHTML = `
-            <div class="result-image-container clickable">
-                <img src="${blobUrl}" alt="${result.filename}" class="result-image">
-                <span class="result-badge ${badgeClass}">${badgeText}</span>
-                <div class="result-zoom-hint">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <circle cx="11" cy="11" r="8"/>
-                        <path d="m21 21-4.35-4.35"/>
-                        <line x1="11" y1="8" x2="11" y2="14"/>
-                        <line x1="8" y1="11" x2="14" y2="11"/>
-                    </svg>
-                </div>
-            </div>
-            <div class="result-info">
-                <div class="result-filename" title="${result.filename}">${result.filename}</div>
-                <div class="result-meta">
-                    <span class="result-size">${result.width} × ${result.height}${statusNote}</span>
-                    <button class="result-download-btn" data-filename="${result.filename}">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                            <polyline points="7 10 12 15 17 10"/>
-                            <line x1="12" y1="15" x2="12" y2="3"/>
-                        </svg>
-                        下載
-                    </button>
-                </div>
-            </div>
-        `;
-        
-        // 綁定圖片點擊開啟燈箱
-        const imageContainer = card.querySelector('.result-image-container');
-        imageContainer.addEventListener('click', () => {
-            openLightbox(imageIndex);
-        });
-        
-        // 綁定下載按鈕事件
-        const downloadBtn = card.querySelector('.result-download-btn');
+
+        const imageContainer = document.createElement('div');
+        imageContainer.className = 'result-image-container clickable';
+
+        const img = document.createElement('img');
+        img.src = blobUrl;
+        img.alt = result.filename;
+        img.className = 'result-image';
+
+        const badge = document.createElement('span');
+        badge.className = `result-badge ${badgeClass}`;
+        badge.textContent = badgeText;
+
+        const zoomHint = document.createElement('div');
+        zoomHint.className = 'result-zoom-hint';
+        zoomHint.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>';
+
+        imageContainer.append(img, badge, zoomHint);
+
+        const info = document.createElement('div');
+        info.className = 'result-info';
+
+        const filenameDiv = document.createElement('div');
+        filenameDiv.className = 'result-filename';
+        filenameDiv.title = result.filename;
+        filenameDiv.textContent = result.filename;
+
+        const meta = document.createElement('div');
+        meta.className = 'result-meta';
+
+        const size = document.createElement('span');
+        size.className = 'result-size';
+        size.textContent = `${result.width} × ${result.height}${statusNote}`;
+
+        const downloadBtn = document.createElement('button');
+        downloadBtn.className = 'result-download-btn';
+        downloadBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>下載';
+
+        meta.append(size, downloadBtn);
+        info.append(filenameDiv, meta);
+        card.append(imageContainer, info);
+
+        imageContainer.addEventListener('click', () => openLightbox(imageIndex));
         downloadBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             downloadFile(result.blob, result.filename);
         });
-        
-        // 儲存 blobUrl 以便之後清理和燈箱使用
+
         result.blobUrl = blobUrl;
         result.originalBlobUrl = originalBlobUrl;
     } else {
-        card.innerHTML = `
-            <div class="result-image-container" style="display: flex; align-items: center; justify-content: center;">
-                <span style="color: var(--error); font-size: 2rem;">✗</span>
-            </div>
-            <div class="result-info">
-                <div class="result-filename" title="${result.filename}">${result.filename}</div>
-                <div class="result-meta">
-                    <span class="result-size" style="color: var(--error);">${result.error}</span>
-                </div>
-            </div>
-        `;
+        const imageContainer = document.createElement('div');
+        imageContainer.className = 'result-image-container';
+        imageContainer.style.cssText = 'display: flex; align-items: center; justify-content: center;';
+        const errIcon = document.createElement('span');
+        errIcon.style.cssText = 'color: var(--error); font-size: 2rem;';
+        errIcon.textContent = '✗';
+        imageContainer.append(errIcon);
+
+        const info = document.createElement('div');
+        info.className = 'result-info';
+
+        const filenameDiv = document.createElement('div');
+        filenameDiv.className = 'result-filename';
+        filenameDiv.title = result.filename;
+        filenameDiv.textContent = result.filename;
+
+        const meta = document.createElement('div');
+        meta.className = 'result-meta';
+        const errMsg = document.createElement('span');
+        errMsg.className = 'result-size';
+        errMsg.style.color = 'var(--error)';
+        errMsg.textContent = result.error;
+        meta.append(errMsg);
+
+        info.append(filenameDiv, meta);
+        card.append(imageContainer, info);
     }
-    
+
     DOM.resultsGrid.appendChild(card);
 }
 
@@ -1077,13 +818,20 @@ function downloadFile(blob, filename) {
 }
 
 function clearResults() {
-    // 釋放所有 blob URLs
+    // 若 lightbox 開著，先關閉避免顯示已 revoke 的破圖
+    if (state.lightbox.isOpen) {
+        closeLightbox();
+    }
+
     state.processedImages.forEach(result => {
         if (result.blobUrl) {
             URL.revokeObjectURL(result.blobUrl);
         }
+        if (result.originalBlobUrl && result.originalBlobUrl !== result.blobUrl) {
+            URL.revokeObjectURL(result.originalBlobUrl);
+        }
     });
-    
+
     state.processedImages = [];
     DOM.resultsGrid.innerHTML = '';
     DOM.resultsSection.hidden = true;
@@ -1091,18 +839,44 @@ function clearResults() {
 
 async function downloadAll() {
     const successfulResults = state.processedImages.filter(r => r.success);
-    
     if (successfulResults.length === 0) return;
-    
-    for (let i = 0; i < successfulResults.length; i++) {
-        const result = successfulResults[i];
-        downloadFile(result.blob, result.filename);
-        
-        // 短暫延遲避免瀏覽器阻擋
-        if (i < successfulResults.length - 1) {
-            await new Promise(resolve => setTimeout(resolve, 300));
-        }
+
+    // 單張：直接下載
+    if (successfulResults.length === 1) {
+        downloadFile(successfulResults[0].blob, successfulResults[0].filename);
+        return;
     }
+
+    // 多張：打包成 zip
+    if (typeof JSZip === 'undefined') {
+        // JSZip 載入失敗 fallback：逐一下載 (可能被瀏覽器阻擋)
+        for (let i = 0; i < successfulResults.length; i++) {
+            downloadFile(successfulResults[i].blob, successfulResults[i].filename);
+            if (i < successfulResults.length - 1) {
+                await new Promise(resolve => setTimeout(resolve, 300));
+            }
+        }
+        return;
+    }
+
+    const zip = new JSZip();
+    // 避免同名衝突
+    const usedNames = new Map();
+    for (const r of successfulResults) {
+        let name = r.filename;
+        const count = usedNames.get(name) || 0;
+        if (count > 0) {
+            const dot = name.lastIndexOf('.');
+            name = dot > 0
+                ? `${name.slice(0, dot)} (${count})${name.slice(dot)}`
+                : `${name} (${count})`;
+        }
+        usedNames.set(r.filename, count + 1);
+        zip.file(name, r.blob);
+    }
+    const zipBlob = await zip.generateAsync({ type: 'blob', compression: 'STORE' });
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    downloadFile(zipBlob, `clear_${stamp}.zip`);
 }
 
 // ===== Start Application =====

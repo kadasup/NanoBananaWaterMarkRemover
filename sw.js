@@ -3,17 +3,18 @@
  * 提供離線支援和快取策略
  */
 
-const CACHE_NAME = 'banana-remover-v1.1.0';
+const CACHE_NAME = 'banana-remover-v1.2.0';
 const ASSETS_TO_CACHE = [
     '/',
     '/index.html',
     '/styles.css',
     '/app.js',
     '/worker.js',
-    '/assets/mask_18.png',
+    '/manifest.json',
     '/assets/mask_48.png',
     '/assets/mask_96.png',
-    '/assets/banana.png'
+    '/assets/icon-192.png',
+    '/assets/icon-512.png'
 ];
 
 // 安裝事件 - 快取資源
