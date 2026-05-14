@@ -2,8 +2,6 @@
 
 使用 **Reverse Alpha Blending** 技術移除 Gemini Nano Banana 浮水印的純前端工具。
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-
 ![](image/image.png)
 
 ## ✨ 功能特色
@@ -70,12 +68,13 @@ http://localhost:3000
 - [Email: 2.jerry32262686@gmail.com](mailto:2.jerry32262686@gmail.com)
 ...
 
-## License
-This project is under the MIT License. See [LICENSE](https://github.com/ADT109119/NanoBananaWaterMarkRemover/blob/main/LICENSE) for further details.
+## Attribution
+
+Based on [ADT109119](https://github.com/ADT109119/NanoBananaWaterMarkRemover)'s MIT-licensed work.
 
 ## Credit
 
 特別感謝以下專案與資源：
 
 - [凱文大叔教你寫程式](https://www.facebook.com/profile.php?id=61564137718583) 的貼文與 [GeminiWatermarkRemove](https://github.com/kevintsai1202/GeminiWatermarkRemove) 專案，提供了製作此專案的靈感
-- [gemini-watermark-remover](https://github.com/journey-ad/gemini-watermark-remover) by [journey-ad](https://github.com/journey-ad) - 本專案使用的 mask 圖片來源 (MIT License)
+- [gemini-watermark-remover](https://github.com/journey-ad/gemini-watermark-remover) by [journey-ad](https://github.com/journey-ad) - 本專案使用的 mask 圖片來源
